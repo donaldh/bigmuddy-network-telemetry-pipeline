@@ -22,6 +22,7 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"github.com/linkedin/goavro"
 )
 
 const (
@@ -76,6 +77,13 @@ type kafkaConsumerConfig struct {
 	keySpec       kafkaKeySpec
 	msgEncoding   encoding
 	logData       bool
+}
+
+type pndaAvroFields struct {
+	timestamp     int64
+	src           string
+	host_ip       string
+	rawdata       []byte
 }
 
 //
@@ -137,6 +145,19 @@ func (cfg *kafkaProducerConfig) dataMsgToKafkaMessage(imsg dataMsg) (
 		return nil, nil, nil, &topic, nil
 	}
 
+	nativedata := make(map[string]pndaAvroFields)
+	nativedata["fields"] = pndaAvroFields{
+		time.Now().Unix(), "pipeline", "127.0.0.1", rawstream,
+	}
+	avrostream, err := pndaAvroCodec.BinaryFromNative(nil, nativedata)
+	if err != nil {
+		cfg.logCtx.WithError(err).WithFields(log.Fields{
+			"msg":   imsg.getDataMsgDescription(),
+			"topic": topic,
+		}).Error("failed to avro encode")
+		return err, nil, nil, &topic, nil
+	}
+
 	switch cfg.keySpec {
 
 	case KAFKA_KEY_SPEC_ID_AND_PATH:
@@ -170,8 +191,8 @@ func (cfg *kafkaProducerConfig) dataMsgToKafkaMessage(imsg dataMsg) (
 	return nil, &sarama.ProducerMessage{
 		Topic: topic,
 		Key:   sarama.StringEncoder(key),
-		Value: sarama.ByteEncoder(rawstream),
-	}, &key, &topic, &rawstream
+		Value: sarama.ByteEncoder(avrostream),
+	}, &key, &topic, &avrostream
 
 }
 
@@ -914,8 +935,25 @@ type kafkaMetaMonitorType struct {
 }
 
 var kafkaMetaMonitor *kafkaMetaMonitorType
+var pndaAvroCodec *goavro.Codec
 
 func init() {
+
+	pndaAvroCodec, err := goavro.NewCodec(`
+{"namespace": "com.cisco.pnda",
+ "type": "record",
+ "name": "PndaRecord",
+ "fields": [
+     {"name": "timestamp",   "type": "long"},
+     {"name": "src",         "type": "string"},
+     {"name": "host_ip",     "type": "string"},
+     {"name": "rawdata",     "type": "bytes"}
+ ]
+}`)
+	if err != nil {
+		fmt.Println(err)
+	}
+	_ = pndaAvroCodec
 
 	kafkaMetaMonitor = &kafkaMetaMonitorType{
 		CountersMsgs: prometheus.NewCounterVec(
