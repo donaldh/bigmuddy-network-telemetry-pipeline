@@ -67,6 +67,7 @@ type kafkaProducerConfig struct {
 	logData      bool
 	logCtx       *log.Entry
 	stats        msgStats
+	avroCodec    *goavro.Codec
 }
 
 type kafkaConsumerConfig struct {
@@ -77,13 +78,6 @@ type kafkaConsumerConfig struct {
 	keySpec       kafkaKeySpec
 	msgEncoding   encoding
 	logData       bool
-}
-
-type pndaAvroFields struct {
-	timestamp     int64
-	src           string
-	host_ip       string
-	rawdata       []byte
 }
 
 //
@@ -145,11 +139,13 @@ func (cfg *kafkaProducerConfig) dataMsgToKafkaMessage(imsg dataMsg) (
 		return nil, nil, nil, &topic, nil
 	}
 
-	nativedata := make(map[string]pndaAvroFields)
-	nativedata["fields"] = pndaAvroFields{
-		time.Now().Unix(), "pipeline", "127.0.0.1", rawstream,
-	}
-	avrostream, err := pndaAvroCodec.BinaryFromNative(nil, nativedata)
+	nativedata := make(map[string]interface {})
+	nativedata["timestamp"] = time.Now().Unix()
+	nativedata["src"] = "pipeline"
+	nativedata["host_ip"] = "127.0.0.1"
+	nativedata["rawdata"] = rawstream
+
+	avrostream, err := cfg.avroCodec.BinaryFromNative(nil, nativedata)
 	if err != nil {
 		cfg.logCtx.WithError(err).WithFields(log.Fields{
 			"msg":   imsg.getDataMsgDescription(),
@@ -474,6 +470,23 @@ func (k *kafkaOutputModule) configure(name string, nc nodeConfig) (
 		}
 	}
 
+	//
+	// Avro codec
+	avroCodec, err := goavro.NewCodec(`
+{"namespace": "com.cisco.pnda",
+ "type": "record",
+ "name": "PndaRecord",
+ "fields": [
+     {"name": "timestamp",   "type": "long"},
+     {"name": "src",         "type": "string"},
+     {"name": "host_ip",     "type": "string"},
+     {"name": "rawdata",     "type": "bytes"}
+ ]
+}`)
+	if err != nil {
+		fmt.Println(err)
+	}
+
 	logctx = logctx.WithFields(
 		log.Fields{
 			"name":         name,
@@ -493,6 +506,7 @@ func (k *kafkaOutputModule) configure(name string, nc nodeConfig) (
 		requiredAcks: requiredAcks,
 		logData:      logData,
 		logCtx:       logctx,
+		avroCodec:    avroCodec,
 	}
 
 	// Create the required channels; a sync ctrl channel and a data channel.
@@ -935,25 +949,9 @@ type kafkaMetaMonitorType struct {
 }
 
 var kafkaMetaMonitor *kafkaMetaMonitorType
-var pndaAvroCodec *goavro.Codec
 
 func init() {
 
-	pndaAvroCodec, err := goavro.NewCodec(`
-{"namespace": "com.cisco.pnda",
- "type": "record",
- "name": "PndaRecord",
- "fields": [
-     {"name": "timestamp",   "type": "long"},
-     {"name": "src",         "type": "string"},
-     {"name": "host_ip",     "type": "string"},
-     {"name": "rawdata",     "type": "bytes"}
- ]
-}`)
-	if err != nil {
-		fmt.Println(err)
-	}
-	_ = pndaAvroCodec
 
 	kafkaMetaMonitor = &kafkaMetaMonitorType{
 		CountersMsgs: prometheus.NewCounterVec(
